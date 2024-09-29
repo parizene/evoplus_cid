@@ -5,11 +5,21 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
+#include <libgen.h> 
 #include "mmc.h"
 
 #define CID_SIZE 16
-#define PROGRAM_CID_OPCODE 26
 #define SAMSUNG_VENDOR_OPCODE 62
+
+struct cid_info {
+    uint8_t  mid;      // Manufacturer ID
+    uint16_t oid;      // OEM/Application ID
+    char     pnm[6];   // Product name (5 chars + null terminator)
+    uint8_t  prv;      // Product revision
+    uint32_t psn;      // Product serial number
+    uint16_t mdt;      // Manufacturing date (year and month)
+};
 
 int mmc_movi_vendor_cmd(unsigned int arg, int fd) {
 	int ret = 0;
@@ -53,7 +63,7 @@ int program_cid(int fd, const unsigned char *cid) {
 
 	idata.data_timeout_ns = 0x10000000;
 	idata.write_flag = 1;
-	idata.opcode = PROGRAM_CID_OPCODE;
+	idata.opcode = MMC_PROGRAM_CID;
 	idata.arg = 0;
 	idata.flags = MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC;
 	idata.blksz = CID_SIZE;
@@ -117,23 +127,123 @@ int parse_serial(const char *str) {
 	return (int)val;
 }
 
+int read_cid_sysfs(const char *device_path, unsigned char *cid) {
+    char sysfs_path[256];
+    FILE *fp;
+
+    // Extract device name from path
+    const char *dev_name = basename((char *)device_path);
+
+    // Construct the sysfs path
+    snprintf(sysfs_path, sizeof(sysfs_path), "/sys/block/%s/device/cid", dev_name);
+
+    fp = fopen(sysfs_path, "r");
+    if (!fp) {
+        perror("Error opening sysfs CID file");
+        return -1;
+    }
+
+    char cid_str[33]; // CID is 16 bytes, so 32 hex chars + null terminator
+    if (fgets(cid_str, sizeof(cid_str), fp) == NULL) {
+        perror("Error reading CID from sysfs");
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+
+    // Convert hex string to bytes
+    for (int i = 0; i < CID_SIZE; i++) {
+        sscanf(&cid_str[i * 2], "%2hhx", &cid[i]);
+    }
+
+    return 0;
+}
+
+void decode_cid(const unsigned char *cid, struct cid_info *info) {
+    // Manufacturer ID (MID)
+    info->mid = cid[0];
+
+    // OEM/Application ID (OID) - 2 bytes
+    info->oid = (cid[1] << 8) | cid[2];
+
+    // Product name (PNM) - 5 characters (40 bits)
+    memcpy(info->pnm, &cid[3], 5);
+    info->pnm[5] = '\0';  // Null-terminate the product name string
+
+    // Product revision (PRV)
+    info->prv = cid[8];
+
+    // Product serial number (PSN) - 4 bytes
+    info->psn = (cid[9] << 24) | (cid[10] << 16) | (cid[11] << 8) | cid[12];
+
+    // Manufacturing date (MDT)
+    info->mdt = ((cid[13] & 0x0F) << 8) | cid[14];
+
+    // CRC and not used bits are typically ignored for decoding purposes
+}
+
+void print_cid_info(const struct cid_info *info) {
+    printf("Manufacturer ID: %02X\n", info->mid);
+    printf("OEM/Application ID: %c%c\n", (info->oid >> 8) & 0xFF, info->oid & 0xFF);
+    printf("Product Name: %s\n", info->pnm);
+    printf("Product Revision: %d.%d\n", (info->prv >> 4) & 0xF, info->prv & 0xF);
+    printf("Product Serial Number: %lu\n", (unsigned long)info->psn);
+
+    // Decode manufacturing date
+    int year = 2000 + ((info->mdt >> 4) & 0xFF);  // Year is offset by 2000
+    int month = info->mdt & 0x0F;  // Month is stored as the lower 4 bits
+    printf("Manufacturing Date: %04d/%02d\n", year, month);
+}
+
 int main(int argc, const char **argv) {
 	int fd, ret, i, len;
 	unsigned char cid[CID_SIZE] = {0};
+  unsigned char current_cid[CID_SIZE];
 
-	if (argc != 3 && argc != 4) {
-		printf("Usage: ./evoplus_cid <device> <cid> [serial]\n");
-		printf("device - sd card block device e.g. /dev/block/mmcblk1\n");
-		printf("cid - new cid, must be in hex (without 0x prefix)\n");
-		printf("  it can be 32 chars with checksum or 30 chars without, it will\n");
-		printf("  be updated with new serial number if supplied, the checksum is\n");
-		printf("  (re)calculated if not supplied or new serial applied\n");
-		printf("serial - optional, can be hex (0x prefixed) or decimal\n");
-		printf("  and will be applied to the supplied cid before writing\n");
-		printf("\n");
-		printf("Warning: use at own risk!\n");
-		return 0;
+	if (argc < 2 || argc > 4) {
+    printf("Usage:\n");
+    printf("  ./evoplus_cid <device>\n");
+    printf("  ./evoplus_cid <device> <cid> [serial]\n");
+    printf("\n");
+    printf("device - sd card block device e.g. /dev/block/mmcblk1\n");
+    printf("cid    - new cid, must be in hex (without 0x prefix)\n");
+    printf("         It can be 32 chars with checksum or 30 chars without.\n");
+    printf("         It will be updated with new serial number if supplied.\n");
+    printf("         The checksum is (re)calculated if not supplied or new serial applied.\n");
+    printf("serial - optional, can be hex (0x prefixed) or decimal\n");
+    printf("         Will be applied to the supplied cid before writing.\n");
+    printf("\n");
+    printf("If no cid is provided, the program will read and display the current CID.\n");
+    printf("Warning: use at your own risk!\n");
+    return 0;
+  }
+
+  // open device
+	fd = open(argv[1], O_RDWR);
+	if (fd < 0){
+		printf("Unable to open device %s\n", argv[1]);
+		return -1;
 	}
+
+  ret = read_cid_sysfs(argv[1], current_cid);
+  if (ret) {
+    printf("Failed to read current CID via sysfs.\n");
+    close(fd);
+    return -1;
+  }
+
+  printf("Current CID: ");
+  show_cid(current_cid);
+
+  struct cid_info info;
+  decode_cid(current_cid, &info);
+  print_cid_info(&info);
+
+  // if only device is provided, exit after displaying CID
+  if (argc == 2) {
+      close(fd);
+      return 0;
+  }
 
 	len = strlen(argv[2]);
 	if (len != 30 && len != 32) {
@@ -141,7 +251,7 @@ int main(int argc, const char **argv) {
 		return -1;
 	}
 
-	// parse cid
+	// parse new cid
 	for (i = 0; i < (len/2); i++){
 		ret = sscanf(&argv[2][i*2], "%2hhx", &cid[i]);
 		if (!ret){
@@ -158,13 +268,6 @@ int main(int argc, const char **argv) {
 	// calculate checksum if required
 	if (len != 32 || argc == 4) {
 		cid[15] = crc7(cid, 15);
-	}
-
-	// open device
-	fd = open(argv[1], O_RDWR);
-	if (fd < 0){
-		printf("Unable to open device %s\n", argv[1]);
-		return -1;
 	}
 
 	// unlock card

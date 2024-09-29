@@ -3,6 +3,9 @@
 
 #include <stdint.h>
 
+#define MMC_SEND_CID             10
+#define MMC_PROGRAM_CID          26
+
 /*
  * EXT_CSD field definitions
  */
@@ -33,13 +36,15 @@
 #define MMC_CMD_AC      (0 << 5)
 #define MMC_CMD_ADTC    (1 << 5)
 
-#define MMC_RSP_SPI_S1  (1 << 7)           
+#define MMC_RSP_SPI_S1  (1 << 7)     
+#define MMC_RSP_SPI_S2	(1 << 8)		/* second byte */      
 #define MMC_RSP_SPI_BUSY (1 << 10)         
 
 #define MMC_CMD_BCR (3 << 5)
 
 #define MMC_RSP_SPI_R1  (MMC_RSP_SPI_S1)
 #define MMC_RSP_SPI_R1B (MMC_RSP_SPI_S1|MMC_RSP_SPI_BUSY)
+#define MMC_RSP_SPI_R2	(MMC_RSP_SPI_S1|MMC_RSP_SPI_S2)
 
 #define MMC_RSP_R1      (MMC_RSP_PRESENT|MMC_RSP_CRC|MMC_RSP_OPCODE)
 #define MMC_RSP_R1B     (MMC_RSP_PRESENT|MMC_RSP_CRC|MMC_RSP_OPCODE|MMC_RSP_BUSY)

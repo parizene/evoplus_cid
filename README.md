@@ -1,3 +1,21 @@
+# Changes
+* fixed Android build
+* added CID printing & CID decoding `./evoplus_cid <device>`
+ 
+```
+# build arm64 on mac
+~/dev/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android21-clang evoplus_cid.c -o evoplus_cid
+
+# copy & run
+adb push evoplus_cid /sdcard/
+adb shell
+su
+cd /sdcard
+mv evoplus_cid /data/local/tmp/
+chmod +x /data/local/tmp/evoplus_cid
+/data/local/tmp/evoplus_cid /dev/block/mmcblk0
+``` 
+
 # evoplus_cid
 Tool to change the CID on Samsung Evo Plus SD Cards. Requires rooted Android device.
 Precompiled Android binary included. May also work on regular Linux, but you must use
